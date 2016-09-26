@@ -1,0 +1,6 @@
+[package]
+name = "lvm-rust"
+version = "0.1.0"
+authors = ["Joe Thornber <ejt@redhat.com>"]
+
+[dependencies]
