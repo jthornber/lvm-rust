@@ -4,3 +4,5 @@ version = "0.1.0"
 authors = ["Joe Thornber <ejt@redhat.com>"]
 
 [dependencies]
+nom = "1.2.4"
+libc = "0.2"
