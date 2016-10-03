@@ -1,0 +1,24 @@
+name: dmsetup
+version: "2.0"
+author: Joe Thornber
+about: Command line tool for driving the Linux device-mapper interface.
+args:
+subcommands:
+  - create:
+      about: creates a new device
+      args:
+        - NAME:
+            help: Name of the new device
+            required: true
+            index: 1
+  - remove:
+      about: removes a device
+      args:
+        - NAME:
+            help: Name of the device to remove
+            required: true
+            index: 1
+  - remove_all:
+      about: remove all device mapper devices
+      
+            
