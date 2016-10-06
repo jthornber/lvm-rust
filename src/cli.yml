@@ -20,5 +20,20 @@ subcommands:
             index: 1
   - remove_all:
       about: remove all device mapper devices
-      
-            
+  - ls:
+      about: lists all devicese
+  - suspend:
+      about: suspends a device
+      args:
+        - NAME:
+            help: name of the device to suspend
+            required: true
+            index: 1
+  - resume:
+      about: resumes a device
+      args:
+        - NAME:
+            help: name of the device to suspend
+            required: true
+            index: 1
+

@@ -38,7 +38,7 @@ fn main() {
         let name = matches.value_of("NAME").unwrap();
         let id = DMIdentity::Name(name);
         dm.create(&id).unwrap();
-        
+
     } else if let Some(matches) = matches.subcommand_matches("remove") {
         let name = matches.value_of("NAME").unwrap();
         let id = DMIdentity::Name(name);
@@ -46,6 +46,23 @@ fn main() {
 
     } else if let Some(_) = matches.subcommand_matches("remove_all") {
         dm.remove_all().unwrap();
+
+    } else if let Some(_) = matches.subcommand_matches("ls") {
+        let ds = dm.list_devices().unwrap();
+
+        for dev in ds {
+            println!("{}\t({}:{})", dev.name, dev.major, dev.minor);
+        }
+
+    } else if let Some(matches) = matches.subcommand_matches("suspend") {
+        let name = matches.value_of("NAME").unwrap();
+        let id = DMIdentity::Name(name);
+        dm.suspend(&id).unwrap();
+        
+    } else if let Some(matches) = matches.subcommand_matches("resume") {
+        let name = matches.value_of("NAME").unwrap();
+        let id = DMIdentity::Name(name);
+        dm.resume(&id).unwrap();
     }
 }
 

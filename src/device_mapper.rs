@@ -33,10 +33,11 @@ fn copy_and_pad<'a, ISrc, IDest>(dest: IDest, src: ISrc)
 }
 
 // FIXME: there must be a version of this in the std library
-fn from_c_str<ISrc: Iterator<Item=u8>>(src: ISrc) -> String {
+// FIXME: add a max_len parameter
+fn from_c_str<ISrc: IntoIterator<Item=u8>>(src: ISrc) -> String {
     let mut r = String::new();
 
-    for c in src {
+    for c in src.into_iter() {
         if c == 0 { break; }
         r.push(c as char)
     }
@@ -73,7 +74,7 @@ struct IoctlHeader {
     data: [u8; 7]
 }
 
-enum DmFlags {
+enum DmFlag {
     DmReadOnlyBit = 0,
     DmSuspendBit = 1,
     DmPersistentDevBit = 3,
@@ -125,77 +126,24 @@ impl IoctlHeader {
             },
 
             DMIdentity::Name(str) => {
-                println!("setting name to {}", &str);
-
                 if str.len() >= DM_NAME_LEN {
                     return false;
                 }
 
                 copy_and_pad(self.name.iter_mut(), str.chars());
                 zero(self.uuid.iter_mut());
-
-                println!("{} {} {} {}", self.name[0], self.name[1], self.name[2], self.name[3]);
             }
         }
 
         true
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use super::IoctlHeader;
-
-    #[test]
-    fn test_set_identity() {
-        let mut h = IoctlHeader::new();
-        let mut too_long = String::new();
-        for i in 0..1024 {
-            too_long.push('a')
-        }
-
-        assert_eq!(h.set_identity(&DMIdentity::Name(&too_long)), false);
-
-        // setting the name
-        assert_eq!(h.set_identity(&DMIdentity::Name("foo")), true);
-        assert_eq!(h.name[0], 'f' as u8);
-        assert_eq!(h.uuid[0], 0);
-
-        // setting the uuid
-        assert_eq!(h.set_identity(&DMIdentity::UUID("asldfkj")), true);
-        assert_eq!(h.uuid[0], 'a' as u8);
-        assert_eq!(h.name[0], 0);
-
-        // shortening name works
-        h.set_identity(&DMIdentity::Name("a-long-name"));
-        h.set_identity(&DMIdentity::Name("foo"));
-        assert_eq!(h.name[3], 0);
-
-        // shortening name works
-        h.set_identity(&DMIdentity::UUID("a-long-name"));
-        h.set_identity(&DMIdentity::UUID("foo"));
-        assert_eq!(h.uuid[3], 0);
-    }
-
-    fn prep_cstr<T: IntoIterator>(src: T) -> Vec<u8> {
-        let mut r = Vec::<u8>::new();
-        for c in src {
-            r.push(c as u8)
-        }
-        r.push(0);
-
-        r
-    }
-
-    #[test]
-    fn test_from_c_str() {
-        let mut cs = prep_cstr("foo");
+    fn set_flag(&mut self, bit: DmFlag) {
+        self.flags &= 1 << (bit as u32);
     }
 }
 
-//----------------------------------------------------------------
-
+#[derive(Debug)]
 pub struct DeviceInfo {
     pub major: u32,
     pub minor: u32,
@@ -279,8 +227,34 @@ impl IoctlBuffer {
         self.get_raw_mut() as *mut IoctlHeader
     }
 
-    unsafe fn get_payload(&mut self) -> *mut u8 {
-        (&mut self.buffer[std::mem::size_of::<IoctlHeader>()..]).as_mut_ptr()
+    unsafe fn get_payload(&self) -> Option<*const u8> {
+        let h = self.get_header();
+        if (*h).data_size == 0 {
+            return None;
+        }
+
+        Some(self.get_raw().offset((*h).data_start as isize))
+    }
+
+    unsafe fn payload_size(&self) -> u32 {
+        // FIXME: check whether data_size includes the header.
+        let h = self.get_header();
+        (*h).data_size
+    }
+
+    // Returns a pair consiting of the ptr, and the max length that
+    // may be examined.
+    unsafe fn get_payload_with_offset(&self, offset: u32) -> Option<(*const u8, u32)> {
+        let h = self.get_header();
+        if offset > self.payload_size() {
+            return None;
+        }
+        
+        match self.get_payload() {
+            None => None,
+            Some(ptr) => Some((ptr.offset(offset as isize),
+                               self.payload_size() - offset))
+        }
     }
 }
 
@@ -338,7 +312,7 @@ impl DMIoctl {
             let r = libc::ioctl(self.control_file.as_raw_fd(), cmd as u64, buf.get_raw());
             if r == 0 {
                 let header: &IoctlHeader = &*buf.get_header();
-                if header.flags & (1 << (DmFlags::DmBufferFullBit as usize)) != 0 {
+                if header.flags & (1 << (DmFlag::DmBufferFullBit as usize)) != 0 {
                     self.exec(cmd, buf.expand())
                 } else {
                     Ok(buf)
@@ -368,6 +342,12 @@ fn not_implemented<T>() -> io::Result<T> {
     Err(Error::new(ErrorKind::Other, "not implemented"))
 }
 
+fn decode_dev(dev: u64) -> (u32, u32) {
+    let major = (dev >> 8) & 0xff;
+    let minor = (dev & 0xff) | (dev >> 20);
+    (major as u32, minor as u32)
+}
+
 impl DMInterface for DMIoctl {
     fn version(&mut self) -> io::Result<(u32, u32, u32)> {
         let buf = try!(self.exec(IoctlCode::DmVersion, IoctlBuffer::new(0)));
@@ -383,17 +363,43 @@ impl DMInterface for DMIoctl {
         let buf = try!(self.exec(IoctlCode::DmListDevices,
                                  IoctlBuffer::new(8192)));
         let mut devs = Vec::<DeviceInfo>::with_capacity(8);
-        // unsafe {
-        //     loop {
-        //         let nl = buf.get_raw() as *const DmNameList;
+        let mut offset: u32 = 0;
+        unsafe {
+            loop {
+                match buf.get_payload_with_offset(offset) {
+                    None => break,
+                    Some((ptr, max)) => {
+                        let nl = ptr as *const DmNameList;
+                        
+                        if (*nl).dev == 0 {
+                            break;
+                        }
 
-        //         if nl.dev == 0 { break; }
+                        // FIXME: use from_c_str
+                        let mut n = String::new();
+                        for c in (*nl).name.iter() {
+                            if *c == 0 {
+                                break;
+                            }
 
-        //         devs.push(DeviceInfo { major: 0,
-        //                                minor: 0,
-        //                                name: n)
-        // }
+                            n.push(*c as char);
+                        }
 
+                        let (major, minor) = decode_dev((*nl).dev);
+                        devs.push(DeviceInfo { major: major,
+                                               minor: minor,
+                                               name: n });
+
+                        if (*nl).next == 0 {
+                            break;
+                        }
+                        
+                        offset += (*nl).next;
+                    }
+                }
+            }
+        }
+        
         Ok(devs)
     }
 
@@ -406,11 +412,15 @@ impl DMInterface for DMIoctl {
     }
 
     fn suspend(&mut self, n: &DMIdentity) -> io::Result<()> {
-        self.exec_void_with_name(IoctlCode::DmDevSuspend, n)
+        let mut buf = IoctlBuffer::new(0);
+        let header: &mut IoctlHeader = unsafe { &mut *buf.get_header_mut() };
+        header.set_identity(n);
+        header.set_flag(DmFlag::DmSuspendBit);
+        try!(self.exec(IoctlCode::DmDevSuspend, buf));
+        Ok(())
     }
 
     fn resume(&mut self, n: &DMIdentity) -> io::Result<()> {
-        // FIXME: set the resume flag
         self.exec_void_with_name(IoctlCode::DmDevSuspend, n)
     }
 
@@ -436,6 +446,60 @@ impl DMInterface for DMIoctl {
 
     fn message(&mut self, n: &DMIdentity, msg: &str, sector: u64) -> io::Result<()> {
         not_implemented()
+    }
+}
+
+//----------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::IoctlHeader;
+
+    #[test]
+    fn test_set_identity() {
+        let mut h = IoctlHeader::new();
+        let mut too_long = String::new();
+        for i in 0..1024 {
+            too_long.push('a')
+        }
+
+        assert_eq!(h.set_identity(&DMIdentity::Name(&too_long)), false);
+
+        // setting the name
+        assert_eq!(h.set_identity(&DMIdentity::Name("foo")), true);
+        assert_eq!(h.name[0], 'f' as u8);
+        assert_eq!(h.uuid[0], 0);
+
+        // setting the uuid
+        assert_eq!(h.set_identity(&DMIdentity::UUID("asldfkj")), true);
+        assert_eq!(h.uuid[0], 'a' as u8);
+        assert_eq!(h.name[0], 0);
+
+        // shortening name works
+        h.set_identity(&DMIdentity::Name("a-long-name"));
+        h.set_identity(&DMIdentity::Name("foo"));
+        assert_eq!(h.name[3], 0);
+
+        // shortening name works
+        h.set_identity(&DMIdentity::UUID("a-long-name"));
+        h.set_identity(&DMIdentity::UUID("foo"));
+        assert_eq!(h.uuid[3], 0);
+    }
+
+    fn prep_cstr<T: IntoIterator>(src: T) -> Vec<u8> {
+        let mut r = Vec::<u8>::new();
+        for c in src {
+            r.push(c as u8)
+        }
+        r.push(0);
+
+        r
+    }
+
+    #[test]
+    fn test_from_c_str() {
+        let mut cs = prep_cstr("foo");
     }
 }
 
