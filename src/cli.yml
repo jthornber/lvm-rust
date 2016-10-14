@@ -36,4 +36,16 @@ subcommands:
             help: name of the device to suspend
             required: true
             index: 1
+  - load:
+      about: loads a new table into the device
+      args:
+        - NAME:
+            help: name of the device for the new table
+            required: true
+            index: 1
+        - table:
+            long: table
+            value_name: TABLE-STRING
+            help: Loads a table from the given string
+            takes_value: true
 

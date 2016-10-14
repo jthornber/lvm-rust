@@ -1,3 +1,6 @@
+// FIXME: remove
+#![allow(unused)]
+
 #[macro_use] extern crate log;
 #[macro_use] extern crate clap;
 
@@ -16,13 +19,113 @@
 // should just be a question of building a suitable Vec<u8>, so
 // perhaps not that tricky.
 
+extern crate regex;
+
 mod device_mapper;
-use device_mapper::*;
+mod device_mapper_high_level;
+mod linear_target;
+mod types;
+
 use clap::App;
+use device_mapper::*;
+use device_mapper_high_level::*;
+use linear_target::*;
+use regex::Regex;
+use std::fmt::Debug;
+use std::io::{Error, ErrorKind};
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+// FIXME: stop using unwrap everywhere.
+// FIXME: implement disk units
 
 //----------------------------------------------------------------
 
-fn main() {
+struct TestConfig {
+    metadata_dev: PathBuf,
+    data_dev: PathBuf
+}
+
+fn scenario_basic_overwrite_linear(cfg: &TestConfig, dm: &mut DMInterface) -> io::Result<()> {
+    // Build up the table string
+    let mut table = Table::new();
+
+    table.push(
+        LinearTarget {
+            dev: cfg.data_dev.clone(),
+            begin: 0,
+            end: 2097152            // 1 gig
+        }).push(
+        LinearTarget {
+            dev: cfg.data_dev.clone(),
+            begin: 2097152,
+            end: 2097152 * 2
+        });
+
+    let id = DMIdentity::Name("foo");
+    try!(dm.create(&id));
+    try!(dm.load(&id, &table.to_dm_targets()));
+    try!(dm.resume(&id));
+
+    let output = try!(Command::new("ls")
+                      .arg("-la")
+                      .output());
+
+    println!("process output = '{:?}'", output.stdout);
+    
+    try!(dm.remove(&id));
+    
+    Ok(())
+}
+
+//----------------------------------------------------------------
+
+fn contains_text(s: &str) -> bool {
+    !s.chars().all(|c| c == ' ' || c == '\t' || c == '\r' || c == '\n')
+}
+
+fn parse_table(str: &String) -> io::Result<Vec<DmTarget>> {
+    let mut r = Vec::with_capacity(8);
+    let re = Regex::new(r"^([0-9]+)\s+([0-9]+)\s+([a-zA-Z]+)\s+(.*)$").unwrap();
+
+    for l in str.split("\\n").filter(|&s| contains_text(s)) {
+        let bits = match re.captures(l) {
+            Some(n) => n,
+            None => return Err(Error::new(ErrorKind::Other,
+                                            "couldn't parse target line"))
+        };
+                
+        let begin = match bits[1].parse::<u64>() {
+            Ok(n) => n,
+            Err(_) => return Err(Error::new(ErrorKind::Other,
+                                            "couldn't parse sector begin"))
+        };
+        
+        let end = match bits[2].parse::<u64>() {
+            Ok(n) => n,
+            Err(_) => return Err(Error::new(ErrorKind::Other,
+                                            "couldn't parse sector end"))
+        };
+        
+        let mut ttype = String::new();
+        ttype.push_str(&bits[3]);
+        let mut args = String::new();
+        args.push_str(&bits[4]);
+        let t = DmTarget { target_type: ttype,
+                           sector_begin: begin,
+                           sector_end: end,
+                           ctr_args: args };
+        println!("pushing {:?}", t);
+        r.push(t)
+    }
+
+    Ok(r)
+}
+
+//----------------------------------------------------------------
+
+fn dmsetup() {
     let yaml = load_yaml!("cli.yml");
     let matches = App::from_yaml(yaml).get_matches();
 
@@ -58,12 +161,41 @@ fn main() {
         let name = matches.value_of("NAME").unwrap();
         let id = DMIdentity::Name(name);
         dm.suspend(&id).unwrap();
-        
+
     } else if let Some(matches) = matches.subcommand_matches("resume") {
         let name = matches.value_of("NAME").unwrap();
         let id = DMIdentity::Name(name);
         dm.resume(&id).unwrap();
+
+    } else if let Some(matches) = matches.subcommand_matches("load") {
+        let name = matches.value_of("NAME").unwrap();
+        let table = matches.value_of("table").unwrap();
+        let id = DMIdentity::Name(name);
+
+        let input = String::from(table);
+        println!("name = {}", name);
+        dm.load(&id, &parse_table(&input).unwrap()).unwrap();
     }
+}
+
+//----------------------------------------------------------------
+
+fn main() {
+    let cfg = TestConfig {
+        metadata_dev: PathBuf::from("/dev/sda"),
+        data_dev: PathBuf::from("/dev/sdb")
+    };
+    
+
+    let mut dm = match device_mapper::DMIoctl::new() {
+        Ok(dm) => dm,
+        Err(e) => {
+            println!("Couldn't create dm interface: {:?}", e);
+            return;
+        }
+    };
+    
+    scenario_basic_overwrite_linear(&cfg, &mut dm).unwrap();
 }
 
 //----------------------------------------------------------------

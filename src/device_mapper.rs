@@ -10,10 +10,18 @@ use std::io::{Error, ErrorKind};
 use std::os::unix::io::AsRawFd;
 use std::path::Path;
 use std;
+use std::mem::size_of;
 
 //----------------------------------------------------------------
 
 /// * Utilities
+fn round_up(n: usize, d: usize) -> usize {
+    if n % d == 0 {
+        n
+    } else {
+        d * ((n / d) + 1)
+    }
+}
 
 /// Zero a u8 iterator
 fn zero<'a, I: Iterator<Item=&'a mut u8>>(it: I) {
@@ -47,6 +55,7 @@ fn from_c_str<ISrc: IntoIterator<Item=u8>>(src: ISrc) -> String {
 
 //----------------------------------------------------------------
 
+const DM_MAX_TYPE_NAME: usize = 16;
 const DM_NAME_LEN: usize = 128;
 const DM_UUID_LEN: usize = 129;
 
@@ -160,6 +169,14 @@ pub enum DMErr {
 
 }
 
+#[derive(Debug)]
+pub struct DmTarget {
+    pub target_type: String,
+    pub sector_begin: u64,
+    pub sector_end: u64,
+    pub ctr_args: String
+}
+
 pub trait DMInterface {
     fn version(&mut self) -> io::Result<(u32, u32, u32)>;
     fn remove_all(&mut self) -> io::Result<()>;
@@ -169,7 +186,7 @@ pub trait DMInterface {
     fn suspend(&mut self, n: &DMIdentity) -> io::Result<()>;
     fn resume(&mut self, n: &DMIdentity) -> io::Result<()>;
     fn clear(&mut self, n: &DMIdentity) -> io::Result<()>;
-    fn load(&mut self, n: &DMIdentity, targets: &Vec<String>) -> io::Result<()>;
+    fn load(&mut self, n: &DMIdentity, targets: &Vec<DmTarget>) -> io::Result<()>;
     fn status(&mut self, n: &DMIdentity) -> io::Result<Vec<String>>;
     fn table(&mut self, n: &DMIdentity) -> io::Result<Vec<String>>;
     fn info(&mut self, n: &DMIdentity) -> io::Result<Vec<String>>;
@@ -186,6 +203,7 @@ impl IoctlBuffer {
     fn new(payload_size: usize) -> IoctlBuffer {
         let total_size = payload_size + std::mem::size_of::<IoctlHeader>();
         let mut buf = IoctlBuffer { buffer: Vec::with_capacity(total_size) };
+        buf.buffer.resize(total_size, 0);
 
         let header: &mut IoctlHeader = unsafe { &mut *buf.get_header_mut() };
 
@@ -236,6 +254,15 @@ impl IoctlBuffer {
         Some(self.get_raw().offset((*h).data_start as isize))
     }
 
+    unsafe fn get_payload_mut(&mut self) -> Option<*mut u8> {
+        let h = self.get_header();
+        if (*h).data_size == 0 {
+            return None;
+        }
+
+        Some(self.get_raw_mut().offset((*h).data_start as isize))
+    }
+
     unsafe fn payload_size(&self) -> u32 {
         // FIXME: check whether data_size includes the header.
         let h = self.get_header();
@@ -256,6 +283,20 @@ impl IoctlBuffer {
                                self.payload_size() - offset))
         }
     }
+
+    unsafe fn get_payload_with_offset_mut(&mut self, offset: u32) -> Option<(*mut u8, u32)> {
+        let h = self.get_header();
+        if offset > self.payload_size() {
+            return None;
+        }
+        
+        match self.get_payload_mut() {
+            None => None,
+            Some(ptr) => Some((ptr.offset(offset as isize),
+                               self.payload_size() - offset))
+        }
+    }
+
 }
 
 //--------------------------------
@@ -265,6 +306,15 @@ struct DmNameList {
     dev: u64,
     next: u32,
     name: [u8; DM_NAME_LEN]
+}
+
+#[repr(C, packed)]
+struct DmTargetSpec {
+    sector_start: u64,
+    length: u64,
+    status: i32,
+    next: u32,
+    target_type: [u8; DM_MAX_TYPE_NAME]
 }
 
 //--------------------------------
@@ -428,8 +478,60 @@ impl DMInterface for DMIoctl {
         self.exec_void_with_name(IoctlCode::DmTableClear, n)
     }
 
-    fn load(&mut self, n: &DMIdentity, targets: &Vec<String>) -> io::Result<()> {
-        not_implemented()
+    // FIXME: factor out common code with list
+    fn load(&mut self, n: &DMIdentity, targets: &Vec<DmTarget>) -> io::Result<()> {
+        // Estimate how much space we need for the targets.
+//        let space = targets.iter().fold(0, |total, target| {
+//            total + target.target_type.len() + target.ctr_args.len() + 48
+        //        });
+        let space = 8192;
+        let mut buf = IoctlBuffer::new(space);
+        let header: &mut IoctlHeader = unsafe { &mut *buf.get_header_mut() };
+        header.target_count = targets.len() as u32;
+        header.set_identity(n);
+
+        let mut offset = 0;
+        unsafe {
+            for t in targets {
+                match buf.get_payload_with_offset(offset) {
+                    None => {
+                        println!("couldn't get payload with offset {}", offset);
+                        break      // FIXME: expand buffer and try again
+                    },
+                    Some((ptr, max)) => {
+                        let ts = ptr as *mut DmTargetSpec;
+                        
+                        (*ts).sector_start = t.sector_begin;
+                        (*ts).length = t.sector_end - t.sector_begin;
+                        (*ts).status = 0;
+                        copy_and_pad((*ts).target_type.iter_mut(), t.target_type.chars());
+
+                        match buf.get_payload_with_offset_mut(offset + size_of::<DmTargetSpec>() as u32) {
+                            None => {
+                                println!("in break {}\n", offset + size_of::<DmTargetSpec>() as u32);
+                                break
+                            },
+                            Some((ptr, max)) => {
+                                // FIXME: check max
+                                for i in 0usize..(t.ctr_args.len()) {
+                                    *(ptr.offset(i as isize)) = t.ctr_args.as_bytes()[i] as u8;
+                                }
+                                *(ptr.offset(t.ctr_args.len() as isize)) = 0;
+                            }
+                        }
+
+                        let delta = size_of::<DmTargetSpec>() + round_up(t.ctr_args.len(), 8);
+                        (*ts).next = delta as u32;
+                        offset += delta as u32;
+                    }
+                }
+            }
+
+            match self.exec(IoctlCode::DmTableLoad, buf) {
+                Ok(_) => Ok(()),
+                Err(e) => Err(e)
+            }
+        }
     }
 
     fn status(&mut self, n: &DMIdentity) -> io::Result<Vec<String>> {
