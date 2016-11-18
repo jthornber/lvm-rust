@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-use device_mapper::*;
+use device_mapper::low_level::*;
 use types::*;
 
 pub trait Target: Debug {

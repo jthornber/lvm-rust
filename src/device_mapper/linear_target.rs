@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use types::*;
 use device_mapper::*;
-use device_mapper_high_level::*;
+use device_mapper::high_level::*;
 
 #[derive(Debug)]
 pub struct LinearTarget {
@@ -16,8 +16,8 @@ impl Target for LinearTarget {
         self.end - self.begin
     }
 
-    fn to_dm_target(&self, offset: Sector) -> DmTarget {
-        DmTarget {
+    fn to_dm_target(&self, offset: Sector) -> low_level::DmTarget {
+        low_level::DmTarget {
             target_type: String::from("linear"),
             sector_begin: offset,
             sector_end: offset + self.end,

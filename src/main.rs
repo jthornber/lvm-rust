@@ -2,6 +2,7 @@
 #![allow(unused)]
 
 #[macro_use] extern crate log;
+#[macro_use] extern crate env_logger;
 #[macro_use] extern crate clap;
 
 // Low level modules:
@@ -21,15 +22,14 @@
 
 extern crate regex;
 
+mod config;
 mod device_mapper;
-mod device_mapper_high_level;
-mod linear_target;
 mod types;
 
 use clap::App;
-use device_mapper::*;
-use device_mapper_high_level::*;
-use linear_target::*;
+use device_mapper::low_level::*;
+use device_mapper::high_level::*;
+use device_mapper::linear_target::*;
 use regex::Regex;
 use std::fmt::Debug;
 use std::io::{Error, ErrorKind};
@@ -129,7 +129,7 @@ fn dmsetup() {
     let yaml = load_yaml!("cli.yml");
     let matches = App::from_yaml(yaml).get_matches();
 
-    let mut dm = match device_mapper::DMIoctl::new() {
+    let mut dm = match device_mapper::low_level::DMIoctl::new() {
         Ok(dm) => dm,
         Err(e) => {
             println!("Couldn't create dm interface: {:?}", e);
@@ -181,13 +181,16 @@ fn dmsetup() {
 //----------------------------------------------------------------
 
 fn main() {
+    env_logger::init().unwrap();
+    info!("Logger initialised");
+    
     let cfg = TestConfig {
         metadata_dev: PathBuf::from("/dev/sda"),
         data_dev: PathBuf::from("/dev/sdb")
     };
     
 
-    let mut dm = match device_mapper::DMIoctl::new() {
+    let mut dm = match device_mapper::low_level::DMIoctl::new() {
         Ok(dm) => dm,
         Err(e) => {
             println!("Couldn't create dm interface: {:?}", e);
