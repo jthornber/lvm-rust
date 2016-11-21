@@ -1,6 +1,15 @@
 // FIXME: remove
 #![allow(unused)]
 
+#![cfg_attr(feature = "clippy", feature(plugin))]
+#![cfg_attr(feature = "clippy", plugin(clippy))]
+#![cfg_attr(not(feature = "clippy"), allow(unknown_lints))]
+
+#![warn(missing_docs)]
+
+#![allow(used_underscore_binding)]
+#![allow(if_not_else)]
+
 extern crate libc;
 
 use std::fs::File;
@@ -65,6 +74,51 @@ const DM_VERSION_PATCH: u32 = 0;
 
 //----------------------------------------------------------------
 
+bitflags!(
+    /// Flags used by devicemapper.
+    flags DmFlags: u32 {
+        /// In: Device should be read-only.
+        /// Out: Device is read-only.
+        const DM_READONLY             = (1 << 0),
+        /// In: Device should be suspended.
+        /// Out: Device is suspended.
+        const DM_SUSPEND              = (1 << 1),
+        /// In: Use passed-in minor number.
+        const DM_PERSISTENT_DEV       = (1 << 3),
+        /// In: STATUS command returns table info instead of status.
+        const DM_STATUS_TABLE         = (1 << 4),
+        /// Out: Active table is present.
+        const DM_ACTIVE_PRESENT       = (1 << 5),
+        /// Out: Inactive table is present.
+        const DM_INACTIVE_PRESENT     = (1 << 6),
+        /// Out: Passed-in buffer was too small.
+        const DM_BUFFER_FULL          = (1 << 8),
+        /// Obsolete.
+        const DM_SKIP_BDGET           = (1 << 9),
+        /// In: Avoid freezing filesystem when suspending.
+        const DM_SKIP_LOCKFS          = (1 << 10),
+        /// In: Suspend without flushing queued I/Os.
+        const DM_NOFLUSH              = (1 << 11),
+        /// In: Query inactive table instead of active.
+        const DM_QUERY_INACTIVE_TABLE = (1 << 12),
+        /// Out: A uevent was generated, the caller may need to wait for it.
+        const DM_UEVENT_GENERATED     = (1 << 13),
+        /// In: Rename affects UUID field, not name field.
+        const DM_UUID                 = (1 << 14),
+        /// In: All buffers are wiped after use. Use when handling crypto keys.
+        const DM_SECURE_DATA          = (1 << 15),
+        /// Out: A message generated output data.
+        const DM_DATA_OUT             = (1 << 16),
+        /// In: Do not remove in-use devices.
+        /// Out: Device scheduled to be removed when closed.
+        const DM_DEFERRED_REMOVE      = (1 << 17),
+        /// Out: Device is suspended internally.
+        const DM_INTERNAL_SUSPEND     = (1 << 18),
+    }
+);
+
+//----------------------------------------------------------------
+
 #[repr(C, packed)]
 struct IoctlHeader {
     version: [u32; 3],
@@ -72,7 +126,7 @@ struct IoctlHeader {
     data_start: u32,
     target_count: u32,
     open_count: i32,
-    flags: u32,
+    flags: DmFlags,
     event_nr: u32,
     padding: u32,
     dev: u64,
@@ -83,25 +137,6 @@ struct IoctlHeader {
     data: [u8; 7]
 }
 
-enum DmFlag {
-    DmReadOnlyBit = 0,
-    DmSuspendBit = 1,
-    DmPersistentDevBit = 3,
-    DmStatusTableBit = 4,
-    DmActivePresentBit = 5,
-    DmInactivePresentBit = 6,
-    DmBufferFullBit = 8,
-    DmSkipBDGetBit = 9,
-    DmSkipLockFSBit = 10,
-    DmNoFlushBit = 11,
-    DmQueryInactiveTableBit = 12,
-    DmUeventGeneratedBit = 13,
-    DmUuidBit = 14,
-    DmSecureDataBit = 15,
-    DmDataOutBit = 16,
-    DmDeferredRemoveBit = 17
-}
-
 impl IoctlHeader {
     fn new() -> IoctlHeader {
         IoctlHeader {
@@ -110,7 +145,7 @@ impl IoctlHeader {
             data_start: 0,
             target_count: 0,
             open_count: 0,
-            flags: 0,
+            flags: DmFlags { bits: 0 },
             event_nr: 0,
             padding: 0,
             dev: 0,
@@ -145,10 +180,6 @@ impl IoctlHeader {
         }
 
         true
-    }
-
-    fn set_flag(&mut self, bit: DmFlag) {
-        self.flags &= 1 << (bit as u32);
     }
 }
 
@@ -362,7 +393,7 @@ impl DMIoctl {
             let r = libc::ioctl(self.control_file.as_raw_fd(), cmd as u64, buf.get_raw());
             if r == 0 {
                 let header: &IoctlHeader = &*buf.get_header();
-                if header.flags & (1 << (DmFlag::DmBufferFullBit as usize)) != 0 {
+                if header.flags.contains(DM_BUFFER_FULL) {
                     self.exec(cmd, buf.expand())
                 } else {
                     Ok(buf)
@@ -465,7 +496,7 @@ impl DMInterface for DMIoctl {
         let mut buf = IoctlBuffer::new(0);
         let header: &mut IoctlHeader = unsafe { &mut *buf.get_header_mut() };
         header.set_identity(n);
-        header.set_flag(DmFlag::DmSuspendBit);
+        header.flags.insert(DM_SUSPEND);
         try!(self.exec(IoctlCode::DmDevSuspend, buf));
         Ok(())
     }
