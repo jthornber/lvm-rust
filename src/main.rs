@@ -22,7 +22,7 @@
 
 extern crate regex;
 
-mod config;
+//mod config;
 mod device_mapper;
 mod types;
 
