@@ -2,11 +2,18 @@
 name = "lvm-rust"
 version = "0.1.0"
 authors = ["Joe Thornber <ejt@redhat.com>"]
+description = "Experiment with rewriting the LVM2 volume manager in Rust"
+repository = "https://github.com/jthornber/lvm-rust"
+keywords = ["Linux", "device", "mapper", "libdm", "lvm", "storage", "volume", "manager"]
+license = "GPL3"
 
 [dependencies]
+bitflags = "0.4"
 clap = { version = "2", features = ["yaml"]}
-nom = "1.2.4"
+clippy = { version = "0", optional = true }
+env_logger = "0.3.5"
 libc = "0.2"
 log = "0.3.6"
-env_logger = "0.3.5"
+nix= "0.7.0"
+nom = "1.2.4"
 regex = "0.1"
